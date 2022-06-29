@@ -8,6 +8,7 @@ import com.netflix.eureka.EurekaServerConfig;
 import com.netflix.eureka.registry.Key;
 
 import javax.inject.Inject;
+import javax.inject.Named;
 import javax.inject.Singleton;
 
 /**

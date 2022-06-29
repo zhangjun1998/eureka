@@ -42,6 +42,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * 应用实例信息，包含着用于注册和被其它节点发现所必需的信息
+ *
+ * <p>
  * The class that holds information required for registration with
  * <tt>Eureka Server</tt> and to be discovered by other components.
  * <p>
@@ -368,6 +371,9 @@ public class InstanceInfo {
         SECURE, UNSECURE
     }
 
+    /**
+     * 建造者，用于简化对象的创建
+     */
     public static final class Builder {
         private static final String COLON = ":";
         private static final String HTTPS_PROTOCOL = "https://";

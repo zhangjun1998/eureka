@@ -32,6 +32,9 @@ import javax.inject.Inject;
 import javax.inject.Singleton;
 
 /**
+ * eureka-server 上下文接口的默认实现
+ *
+ * <p>
  * Represent the local server context and exposes getters to components of the
  * local server such as the registry.
  *
@@ -41,18 +44,29 @@ import javax.inject.Singleton;
 public class DefaultEurekaServerContext implements EurekaServerContext {
     private static final Logger logger = LoggerFactory.getLogger(DefaultEurekaServerContext.class);
 
+    // 上下文主要就是提供了初始化和销毁方法，并对外暴露以下属性的获取方法
+
+    // eureka-server 配置
     private final EurekaServerConfig serverConfig;
+    // 编解码器
     private final ServerCodecs serverCodecs;
+    // 可以感知集群的注册表
     private final PeerAwareInstanceRegistry registry;
+    // 集群
     private final PeerEurekaNodes peerEurekaNodes;
+    // 应用实例管理器
     private final ApplicationInfoManager applicationInfoManager;
 
+    /**
+     * 构造函数
+     */
     @Inject
     public DefaultEurekaServerContext(EurekaServerConfig serverConfig,
                                ServerCodecs serverCodecs,
                                PeerAwareInstanceRegistry registry,
                                PeerEurekaNodes peerEurekaNodes,
                                ApplicationInfoManager applicationInfoManager) {
+        // 初始化本地变量
         this.serverConfig = serverConfig;
         this.serverCodecs = serverCodecs;
         this.registry = registry;
@@ -60,12 +74,15 @@ public class DefaultEurekaServerContext implements EurekaServerContext {
         this.applicationInfoManager = applicationInfoManager;
     }
 
+    // 初始化上下文
     @PostConstruct
     @Override
     public void initialize() {
         logger.info("Initializing ...");
+        // 启动 eureka 集群
         peerEurekaNodes.start();
         try {
+            // 初始化注册表
             registry.init(peerEurekaNodes);
         } catch (Exception e) {
             throw new RuntimeException(e);

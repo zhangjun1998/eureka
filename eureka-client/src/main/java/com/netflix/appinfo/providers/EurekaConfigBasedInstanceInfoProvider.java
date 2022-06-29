@@ -17,6 +17,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * 用于构造应用实例对象，简化对象的创建过程，单例模式
+ *
+ * <p>
  * InstanceInfo provider that constructs the InstanceInfo this this instance using
  * EurekaInstanceConfig.
  *
@@ -30,8 +33,10 @@ import org.slf4j.LoggerFactory;
 public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceInfo> {
     private static final Logger LOG = LoggerFactory.getLogger(EurekaConfigBasedInstanceInfoProvider.class);
 
+    // 应用实例配置
     private final EurekaInstanceConfig config;
 
+    // 应用实例，需要保证单例
     private InstanceInfo instanceInfo;
 
     @Inject(optional = true)
@@ -42,9 +47,18 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
         this.config = config;
     }
 
+    /**
+     * synchronized 关键字保证单例
+     */
     @Override
     public synchronized InstanceInfo get() {
+        // 注：这里调整了部分代码顺序，方便阅读
+
+        // 实例还没有创建，进行创建
         if (instanceInfo == null) {
+            // 1. 准备对象创建需要的一些属性
+
+            // 续约信息，主要包含续约间隔(默认30s)和有效期(默认90s)
             // Build the lease information to be passed to the server based on config
             LeaseInfo.Builder leaseInfoBuilder = LeaseInfo.Builder.newBuilder()
                     .setRenewalIntervalInSecs(config.getLeaseRenewalIntervalInSeconds())
@@ -53,9 +67,6 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
             if (vipAddressResolver == null) {
                 vipAddressResolver = new Archaius1VipAddressResolver();
             }
-
-            // Builder the instance information to be registered with eureka server
-            InstanceInfo.Builder builder = InstanceInfo.Builder.newBuilder(vipAddressResolver);
 
             // set the appropriate id for the InstanceInfo, falling back to datacenter Id if applicable, else hostname
             String instanceId = config.getInstanceId();
@@ -81,6 +92,11 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
                 defaultAddress = config.getIpAddress();
             }
 
+            // 2. 使用建造者模式创建 InstanceInfo 对象，InstanceInfo.Builder 内部类作为建造者
+
+            // 创建建造者
+            InstanceInfo.Builder builder = InstanceInfo.Builder.newBuilder(vipAddressResolver);
+            // 设置对象属性
             builder.setNamespace(config.getNamespace())
                     .setInstanceId(instanceId)
                     .setAppName(config.getAppname())
@@ -112,7 +128,7 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
                          InstanceStatus.UP);
             }
 
-            // Add any user-specific metadata information
+            // 注入在配置中指定的一些自定义属性
             for (Map.Entry<String, String> mapEntry : config.getMetadataMap().entrySet()) {
                 String key = mapEntry.getKey();
                 String value = mapEntry.getValue();
@@ -122,6 +138,7 @@ public class EurekaConfigBasedInstanceInfoProvider implements Provider<InstanceI
                 }
             }
 
+            // 创建对象
             instanceInfo = builder.build();
             instanceInfo.setLeaseInfo(leaseInfoBuilder.build());
         }

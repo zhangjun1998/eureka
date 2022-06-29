@@ -47,6 +47,12 @@ import com.thoughtworks.xstream.annotations.XStreamAlias;
 import com.thoughtworks.xstream.annotations.XStreamImplicit;
 
 /**
+ * 封装了所有从 eureka-server 返回的注册信息，它的结构划分如下：
+ * InstanceInfo：应用实例信息
+ * Application：包含了单个 eureka-server 的所有应用实例信息
+ * Applications：包含了所有 eureka-server 的信息
+ *
+ * <p>
  * The class that wraps all the registry information returned by eureka server.
  *
  * <p>
@@ -83,7 +89,9 @@ public class Applications {
     private String appsHashCode;
     private Long versionDelta;
     @XStreamImplicit
+    // 将所有 eureka-server 节点 Application 都保存了一份到 ConcurrentLinkedQueue 中
     private final AbstractQueue<Application> applications;
+    // 又按照 eureka-server 节点来划分在 ConcurrentHashMap 中存了一份
     private final Map<String, Application> appNameApplicationMap;
     private final Map<String, VipIndexSupport> virtualHostNameAppMap;
     private final Map<String, VipIndexSupport> secureVirtualHostNameAppMap;
