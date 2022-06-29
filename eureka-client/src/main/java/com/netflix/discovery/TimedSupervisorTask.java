@@ -17,7 +17,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * eureka 对 TimerTask 的封装，主要是为了满足 eureka 对任务的调度执行设计
+ * eureka 对 TimerTask 的封装，支持以下特性：
+ * <ol>
+ *     <li>调度线程池与执行线程池分离</li>
+ *     <li>任务执行失败时自动阶梯式增加调度延迟时间</li>
+ *     <li><监控任务执行成功、超时、拒绝、异常等次数/li>
+ * </ol>
  *
  * <p>
  * A supervisor task that schedules subtasks while enforce a timeout.
@@ -52,7 +57,7 @@ public class TimedSupervisorTask extends TimerTask {
 
     // 延迟时间，决定任务的调度间隔
     private final AtomicLong delay;
-    // 最大延迟时间(默认为延迟时间的10倍)
+    // 最大调度延迟时间(默认为延迟时间的10倍)
     private final long maxDelay;
 
     /**
@@ -71,7 +76,7 @@ public class TimedSupervisorTask extends TimerTask {
         this.task = task;
         // 延迟时间设置为超时时间
         this.delay = new AtomicLong(timeoutMillis);
-        // 最大延迟时间设为超时时间的x倍(默认10倍)
+        // 最大调度延迟 = 超时时间 * expBackOffBound，expBackOffBound 默认为10
         this.maxDelay = timeoutMillis * expBackOffBound;
 
         // 初始化计数器
@@ -85,12 +90,7 @@ public class TimedSupervisorTask extends TimerTask {
     }
 
     /**
-     * 重写 TimerTask 的 run() 方法
-     * <ol>
-     *     <li>提交任务到执行线程池</li>
-     *     <li>获取任务执行结果</li>
-     *     <li></li>
-     * </ol>
+     * 重写了 TimerTask 的 run() 方法
      */
     @Override
     public void run() {
@@ -119,7 +119,6 @@ public class TimedSupervisorTask extends TimerTask {
             long newDelay = Math.min(maxDelay, currentDelay * 2);
             // CAS 更新延迟时间
             delay.compareAndSet(currentDelay, newDelay);
-
         } catch (RejectedExecutionException e) { // 拒绝任务
             if (executor.isShutdown() || scheduler.isShutdown()) {
                 logger.warn("task supervisor shutting down, reject the task", e);

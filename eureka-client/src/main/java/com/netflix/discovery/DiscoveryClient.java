@@ -535,6 +535,7 @@ public class DiscoveryClient implements EurekaClient {
         }
 
         // 3.5 需要的话将自己注册到其它节点
+        // true && false == false，默认在创建 EurekaClient 时不会进行注册
         if (clientConfig.shouldRegisterWithEureka() && clientConfig.shouldEnforceRegistrationAtInit()) {
             try {
                 // 注册到其它节点，如果注册失败直接抛异常
@@ -943,9 +944,11 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * Register with the eureka service by making the appropriate REST call.
+     * 注册应用实例
      */
     boolean register() throws Throwable {
+        // 通过 eurekaTransport 对象向注册中心发起 Rest 请求进行注册，携带的 body 为 InstanceInfo 对象
+        // path 为 apps/{appName}
         logger.info(PREFIX + "{}: registering service...", appPathIdentifier);
         EurekaHttpResponse<Void> httpResponse;
         try {
@@ -961,23 +964,29 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * Renew with the eureka service by making the appropriate REST call
+     * 心跳续约
      */
     boolean renew() {
         EurekaHttpResponse<InstanceInfo> httpResponse;
         try {
+            // 调用 eurekaTransport 通信对象发送心跳信息
+            // Rest 接口的 path 为 /apps/{appName}/{instanceId}
             httpResponse = eurekaTransport.registrationClient.sendHeartBeat(instanceInfo.getAppName(), instanceInfo.getId(), instanceInfo, null);
             logger.debug(PREFIX + "{} - Heartbeat status: {}", appPathIdentifier, httpResponse.getStatusCode());
+            // 若注册中心没找到该服务实例，重新注册
             if (httpResponse.getStatusCode() == Status.NOT_FOUND.getStatusCode()) {
                 REREGISTER_COUNTER.increment();
                 logger.info(PREFIX + "{} - Re-registering apps/{}", appPathIdentifier, instanceInfo.getAppName());
                 long timestamp = instanceInfo.setIsDirtyWithTime();
+                // 注册实例
                 boolean success = register();
                 if (success) {
                     instanceInfo.unsetIsDirty(timestamp);
                 }
+                // 返回注册结果作为续约结果
                 return success;
             }
+            // 返回续约结果
             return httpResponse.getStatusCode() == Status.OK.getStatusCode();
         } catch (Throwable e) {
             logger.error(PREFIX + "{} - was unable to send heartbeat!", appPathIdentifier, e);
@@ -1416,7 +1425,7 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * 初始化所有需要执行的任务
+     * 初始化需要调度的任务
      * <p>
      * Initializes all scheduled tasks.
      */
@@ -1442,7 +1451,7 @@ public class DiscoveryClient implements EurekaClient {
             scheduler.schedule(cacheRefreshTask, registryFetchIntervalSeconds, TimeUnit.SECONDS);
         }
 
-        // 2. 需要注册到其它节点，维持心跳任务
+        // 2. 需要注册到其它节点
         if (clientConfig.shouldRegisterWithEureka()) {
             // 续约间隔(心跳)，默认30s
             int renewalIntervalInSecs = instanceInfo.getLeaseInfo().getRenewalIntervalInSecs();
@@ -1450,15 +1459,15 @@ public class DiscoveryClient implements EurekaClient {
             int expBackOffBound = clientConfig.getHeartbeatExecutorExponentialBackOffBound();
             logger.info("Starting heartbeat executor: " + "renew interval is: {}", renewalIntervalInSecs);
 
-            // Heartbeat timer
             // 2.1 创建心跳任务
+            // TimedSupervisorTask 是 eureka 对 TimerTask 的封装
             heartbeatTask = new TimedSupervisorTask(
                     "heartbeat",
-                    scheduler,
-                    heartbeatExecutor,
-                    renewalIntervalInSecs,
+                    scheduler, // 调度线程池
+                    heartbeatExecutor, // 心跳线程池
+                    renewalIntervalInSecs, // 心跳间隔，30s
                     TimeUnit.SECONDS,
-                    expBackOffBound,
+                    expBackOffBound, // 调度最大延迟时间 = 超时时间 * expBackOffBound，expBackOffBound 默认为10
                     new HeartbeatThread() // 心跳任务
             );
             // 丢到调度线程池中执行，默认 30s 调度一次，可配置
@@ -1466,17 +1475,16 @@ public class DiscoveryClient implements EurekaClient {
             scheduler.schedule(heartbeatTask, renewalIntervalInSecs, TimeUnit.SECONDS);
 
 
-            // 实例信息复制器，这个名字有点迷惑人，实际上它的作用就是服务注册
-            // 虽然在启动时会将该节点注册到其它节点，但是之后就没有其它的注册时机了，因此这个任务主要就是在运行中不断的检查当前节点的配置和健康状态，
-            // 当配置信息发生改动时可以自动的重新进行注册，并且还可以检查应用的健康来决定是否需要将该节点下线
-            // InstanceInfo replicator
+            // 2.2 实例信息复制器
+            // 实例信息复制器，这个名字有点迷惑人，实际上它的作用是服务注册
+            // 它可以在启动时进行注册、在应用实例配置发生变化时重新注册、在健康检查失败时将应用实例下线
             instanceInfoReplicator = new InstanceInfoReplicator(
                     this,
                     instanceInfo,
                     clientConfig.getInstanceInfoReplicationIntervalSeconds(), // 默认30s
                     2); // burstSize
 
-            // 实例状态变更监听器，当 eureka-server 的实例信息发生变动时就会触发
+            // 创建实例状态变更监听器，当 eureka-server 的实例信息发生变动时就会触发
             statusChangeListener = new ApplicationInfoManager.StatusChangeListener() {
                 @Override
                 public String getId() {
@@ -1496,7 +1504,8 @@ public class DiscoveryClient implements EurekaClient {
                 applicationInfoManager.registerStatusChangeListener(statusChangeListener);
             }
 
-            // 启动 实例信息复制器，默认延迟 40s 执行
+            // 启动 实例信息复制器，默认延迟 40s 执行，也就是说启动 40s 后才会进行注册
+            // 在 spring 对 eureka 的封装中改变了注册行为，会在启动后立即进行注册
             instanceInfoReplicator.start(clientConfig.getInitialInstanceInfoReplicationIntervalSeconds());
         } else {
             logger.info("Not registering with Eureka server per configuration");
@@ -1567,33 +1576,42 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
+     * 刷新应用实例信息
+     *
+     * <p>
      * Refresh the current local instanceInfo. Note that after a valid refresh where changes are observed, the
      * isDirty flag on the instanceInfo is set to true
      */
     void refreshInstanceInfo() {
+        // 刷新数据中心信息，暂不关注
         applicationInfoManager.refreshDataCenterInfoIfRequired();
+
+        // 刷新续约信息
         applicationInfoManager.refreshLeaseInfoIfRequired();
 
         InstanceStatus status;
         try {
+            // 进行健康检查，返回检查后的应用实例状态
             status = getHealthCheckHandler().getStatus(instanceInfo.getStatus());
-        } catch (Exception e) {
+        } catch (Exception e) { // 执行健康检查异常，设置应用实例状态为下线
             logger.warn("Exception from healthcheckHandler.getStatus, setting status to DOWN", e);
             status = InstanceStatus.DOWN;
         }
-
+        // 更新应用实例状态
         if (null != status) {
             applicationInfoManager.setInstanceStatus(status);
         }
     }
 
     /**
-     * The heartbeat task that renews the lease in the given intervals.
+     * 内部类，心跳维持任务
      */
     private class HeartbeatThread implements Runnable {
 
         public void run() {
+            // 心跳续约
             if (renew()) {
+                // 心跳成功，更新最后一次心跳时间
                 lastSuccessfulHeartbeatTimestamp = System.currentTimeMillis();
             }
         }

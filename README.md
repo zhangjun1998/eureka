@@ -20,9 +20,12 @@
 + [x] EurekaClient
 + [x] EurekaConfigBasedInstanceInfoProvider
 + [x] DiscoveryClient
++ [x] InstanceInfoReplicator
++ [x] LeaseInfo
 + [x] TimedSupervisorTask
 + [x] AbstractInstanceRegistry
 + [x] PeerAwareInstanceRegistry
++ [x] PeerAwareInstanceRegistryImpl
 + [x] PeerEurekaNodes
 + [x] EurekaServerContext
 + [x] DefaultEurekaServerContext

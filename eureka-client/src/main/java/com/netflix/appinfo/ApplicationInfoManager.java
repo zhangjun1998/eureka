@@ -245,11 +245,18 @@ public class ApplicationInfoManager {
         instanceInfo.setIsDirty();
     }
 
+    /**
+     * 刷新应用实例续约信息。
+     * 将 EurekaClientConfig 中拿到的续约配置与当前续约配置做对比，
+     * 如果有变化则重新创建应用实例的续约信息，并将应用实例设置为 dirty
+     */
     public void refreshLeaseInfoIfRequired() {
         LeaseInfo leaseInfo = instanceInfo.getLeaseInfo();
         if (leaseInfo == null) {
             return;
         }
+
+        // 对比续约配置
         int currentLeaseDuration = config.getLeaseExpirationDurationInSeconds();
         int currentLeaseRenewal = config.getLeaseRenewalIntervalInSeconds();
         if (leaseInfo.getDurationInSecs() != currentLeaseDuration || leaseInfo.getRenewalIntervalInSecs() != currentLeaseRenewal) {
@@ -257,7 +264,9 @@ public class ApplicationInfoManager {
                     .setRenewalIntervalInSecs(currentLeaseRenewal)
                     .setDurationInSecs(currentLeaseDuration)
                     .build();
+            // 续约配置发生变化，更新续约信息
             instanceInfo.setLeaseInfo(newLeaseInfo);
+            // 设置应用实例状态为dirty
             instanceInfo.setIsDirty();
         }
     }
