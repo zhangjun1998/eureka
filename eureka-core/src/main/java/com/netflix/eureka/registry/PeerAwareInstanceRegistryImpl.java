@@ -41,6 +41,8 @@ import com.netflix.eureka.registry.rule.FirstMatchWinsCompositeRule;
 import com.netflix.eureka.registry.rule.InstanceStatusOverrideRule;
 import com.netflix.eureka.registry.rule.LeaseExistsRule;
 import com.netflix.eureka.registry.rule.OverrideExistsRule;
+import com.netflix.eureka.resources.ApplicationResource;
+import com.netflix.eureka.resources.ApplicationsResource;
 import com.netflix.eureka.resources.CurrentRequestVersion;
 import com.netflix.eureka.EurekaServerConfig;
 import com.netflix.eureka.Version;
@@ -281,9 +283,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
             primeAwsReplicas(applicationInfoManager);
         }
         logger.info("Changing status to UP");
-        // 更新实例状态为 UP
+        // 更新实例状态为 UP，触发应用实例状态变化监听器，执行 InstanceInfoReplicator 完成应用注册
         applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
-        // 执行一些后置操作
+        // 执行注册的一些后置操作
         super.postInit();
     }
 
@@ -421,6 +423,12 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     }
 
     /**
+     * 注册指定的应用实例，并将副本信息复制到集群中其它节点。
+     * 在 eureka-server 接收应用实例注册请求时会将请求转发到这里处理。
+     * {@link ApplicationsResource#getApplicationResource(java.lang.String, java.lang.String)}
+     * {@link ApplicationResource#addInstance(com.netflix.appinfo.InstanceInfo, java.lang.String)}
+     *
+     * <p>
      * Registers the information about the {@link InstanceInfo} and replicates
      * this information to all peer eureka nodes. If this is replication event
      * from other replica nodes then it is not replicated.
@@ -433,22 +441,30 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
      */
     @Override
     public void register(final InstanceInfo info, final boolean isReplication) {
+        // 实例没有配置续约过期时间，默认 90s
         int leaseDuration = Lease.DEFAULT_DURATION_IN_SECS;
         if (info.getLeaseInfo() != null && info.getLeaseInfo().getDurationInSecs() > 0) {
             leaseDuration = info.getLeaseInfo().getDurationInSecs();
         }
+        // 调用父抽象类 AbstractInstanceRegistry 的方法，注册应用实例
         super.register(info, leaseDuration, isReplication);
+        // 复制实例到集群的其它节点
         replicateToPeers(Action.Register, info.getAppName(), info.getId(), info, null, isReplication);
     }
 
     /*
+     * 处理服务实例的心跳续约
+     *
+     * <p>
      * (non-Javadoc)
      *
      * @see com.netflix.eureka.registry.InstanceRegistry#renew(java.lang.String,
      * java.lang.String, long, boolean)
      */
     public boolean renew(final String appName, final String id, final boolean isReplication) {
+        // 调用抽象父类的 renew() 方法进行心跳续约
         if (super.renew(appName, id, isReplication)) {
+            // 若续约成功，同步实例的续约操作到集群的其它节点
             replicateToPeers(Action.Heartbeat, appName, id, null, null, isReplication);
             return true;
         }
@@ -651,9 +667,11 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     }
 
     /**
+     * 将实例发起的操作同步到集群中的其它节点
+     *
+     * <p>
      * Replicates all eureka actions to peer eureka nodes except for replication
      * traffic to this node.
-     *
      */
     private void replicateToPeers(Action action, String appName, String id,
                                   InstanceInfo info /* optional */,
@@ -668,11 +686,14 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
                 return;
             }
 
+            // 遍历集群节点
             for (final PeerEurekaNode node : peerEurekaNodes.getPeerEurekaNodes()) {
-                // If the url represents this host, do not replicate to yourself.
+                // 不复制给自己
                 if (peerEurekaNodes.isThisMyUrl(node.getServiceUrl())) {
                     continue;
                 }
+                // 复制到其它节点
+                // 其实就是根据操作类型调用相应的 Rest 接口
                 replicateInstanceActionsToPeers(action, appName, id, info, newStatus, node);
             }
         } finally {
@@ -681,6 +702,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     }
 
     /**
+     * 将实例的操作同步到指定节点
+     *
+     * <p>
      * Replicates all instance changes to peer eureka nodes except for
      * replication traffic to this node.
      *

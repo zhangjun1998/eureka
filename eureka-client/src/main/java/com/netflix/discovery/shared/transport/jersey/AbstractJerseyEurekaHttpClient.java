@@ -43,8 +43,12 @@ public abstract class AbstractJerseyEurekaHttpClient implements EurekaHttpClient
         logger.debug("Created client for url: {}", serviceUrl);
     }
 
+    /**
+     * 注册应用实例
+     */
     @Override
     public EurekaHttpResponse<Void> register(InstanceInfo info) {
+        // path 为 apps/{appName}
         String urlPath = "apps/" + info.getAppName();
         ClientResponse response = null;
         try {
@@ -54,6 +58,7 @@ public abstract class AbstractJerseyEurekaHttpClient implements EurekaHttpClient
                     .header("Accept-Encoding", "gzip")
                     .type(MediaType.APPLICATION_JSON_TYPE)
                     .accept(MediaType.APPLICATION_JSON)
+                    // post 请求，body 为 InstanceInfo 对象
                     .post(ClientResponse.class, info);
             return anEurekaHttpResponse(response.getStatus()).headers(headersOf(response)).build();
         } finally {
