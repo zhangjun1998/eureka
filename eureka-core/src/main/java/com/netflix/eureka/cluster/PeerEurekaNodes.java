@@ -26,6 +26,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * eureka 集群
+ *
+ * <p>
  * Helper class to manage lifecycle of a collection of {@link PeerEurekaNode}s.
  *
  * @author Tomasz Bak
@@ -72,7 +75,11 @@ public class PeerEurekaNodes {
         return serverConfig.getHealthStatusMinNumberOfAvailablePeers();
     }
 
+    /**
+     * 启动 eureka 集群
+     */
     public void start() {
+        // 1. 创建调度线程池
         taskExecutor = Executors.newSingleThreadScheduledExecutor(
                 new ThreadFactory() {
                     @Override
@@ -83,8 +90,12 @@ public class PeerEurekaNodes {
                     }
                 }
         );
+
+        // 2. 立即更新集群节点、定时调度
         try {
+            // 立即更新集群节点
             updatePeerEurekaNodes(resolvePeerUrls());
+            // 创建集群节点更新任务
             Runnable peersUpdateTask = new Runnable() {
                 @Override
                 public void run() {
@@ -96,10 +107,11 @@ public class PeerEurekaNodes {
 
                 }
             };
+            // 将集群节点更新任务丢到线程池，默认10分钟执行一次
             taskExecutor.scheduleWithFixedDelay(
                     peersUpdateTask,
-                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(),
-                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(),
+                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(), // 延迟10分钟执行
+                    serverConfig.getPeerEurekaNodesUpdateIntervalMs(), // 默认10分钟调度一次
                     TimeUnit.MILLISECONDS
             );
         } catch (Exception e) {
@@ -145,6 +157,8 @@ public class PeerEurekaNodes {
     }
 
     /**
+     * 集群节点更新任务
+     *
      * Given new set of replica URLs, destroy {@link PeerEurekaNode}s no longer available, and
      * create new ones.
      *
@@ -156,6 +170,7 @@ public class PeerEurekaNodes {
             return;
         }
 
+        // 找出需要下线和新增的节点
         Set<String> toShutdown = new HashSet<>(peerEurekaNodeUrls);
         toShutdown.removeAll(newPeerUrls);
         Set<String> toAdd = new HashSet<>(newPeerUrls);
@@ -168,6 +183,7 @@ public class PeerEurekaNodes {
         // Remove peers no long available
         List<PeerEurekaNode> newNodeList = new ArrayList<>(peerEurekaNodes);
 
+        // 处理需要下线的节点
         if (!toShutdown.isEmpty()) {
             logger.info("Removing no longer available peer nodes {}", toShutdown);
             int i = 0;
@@ -183,6 +199,7 @@ public class PeerEurekaNodes {
         }
 
         // Add new peers
+        // 处理新增的节点
         if (!toAdd.isEmpty()) {
             logger.info("Adding new peer nodes {}", toAdd);
             for (String peerUrl : toAdd) {
@@ -190,6 +207,7 @@ public class PeerEurekaNodes {
             }
         }
 
+        // 更新当前集群的节点集合
         this.peerEurekaNodes = newNodeList;
         this.peerEurekaNodeUrls = new HashSet<>(newPeerUrls);
     }

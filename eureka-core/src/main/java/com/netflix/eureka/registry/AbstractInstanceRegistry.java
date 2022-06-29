@@ -62,6 +62,9 @@ import org.slf4j.LoggerFactory;
 import static com.netflix.eureka.util.EurekaMonitors.*;
 
 /**
+ * 注册表抽象类
+ *
+ * <p>
  * Handles all registry requests from eureka clients.
  *
  * <p>
@@ -77,54 +80,74 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     private static final Logger logger = LoggerFactory.getLogger(AbstractInstanceRegistry.class);
 
     private static final String[] EMPTY_STR_ARRAY = new String[0];
-    private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry
-            = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
+
+    // 注册表
+    private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
+
     protected Map<String, RemoteRegionRegistry> regionNameVSRemoteRegistry = new HashMap<String, RemoteRegionRegistry>();
     protected final ConcurrentMap<String, InstanceStatus> overriddenInstanceStatusMap = CacheBuilder
             .newBuilder().initialCapacity(500)
             .expireAfterAccess(1, TimeUnit.HOURS)
             .<String, InstanceStatus>build().asMap();
 
-    // CircularQueues here for debugging/statistics purposes only
+    // 最近注册队列，默认容量为1000的循环队列
     private final CircularQueue<Pair<Long, String>> recentRegisteredQueue;
+    // 最近下线队列，默认容量为1000的循环队列
     private final CircularQueue<Pair<Long, String>> recentCanceledQueue;
+    // 最近变更队列，基于链表的无界队列
     private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<>();
 
+    // 读写锁
     private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
     private final Lock read = readWriteLock.readLock();
     private final Lock write = readWriteLock.writeLock();
     protected final Object lock = new Object();
 
+    // 定时任务，用于剔除最近变更队列中最近 180s 内没有变更的元素
     private Timer deltaRetentionTimer = new Timer("Eureka-DeltaRetentionTimer", true);
+    // 定时任务，用于驱逐过期的服务
     private Timer evictionTimer = new Timer("Eureka-EvictionTimer", true);
+
+    // 最近一分钟续约次数计数器
     private final MeasuredRate renewsLastMin;
 
+    // EvictionTask 的原子引用
     private final AtomicReference<EvictionTask> evictionTaskRef = new AtomicReference<>();
 
     protected String[] allKnownRemoteRegions = EMPTY_STR_ARRAY;
     protected volatile int numberOfRenewsPerMinThreshold;
     protected volatile int expectedNumberOfClientsSendingRenews;
 
+    // 相关配置
     protected final EurekaServerConfig serverConfig;
     protected final EurekaClientConfig clientConfig;
     protected final ServerCodecs serverCodecs;
+
+    // 拉取注册表缓存
     protected volatile ResponseCache responseCache;
 
     /**
      * Create a new, empty instance registry.
      */
     protected AbstractInstanceRegistry(EurekaServerConfig serverConfig, EurekaClientConfig clientConfig, ServerCodecs serverCodecs) {
+        // 初始化一些配置
         this.serverConfig = serverConfig;
         this.clientConfig = clientConfig;
         this.serverCodecs = serverCodecs;
-        this.recentCanceledQueue = new CircularQueue<Pair<Long, String>>(1000);
-        this.recentRegisteredQueue = new CircularQueue<Pair<Long, String>>(1000);
 
+        // 初始化最近下线队列，保存了最近下线实例的循环队列。是个容量为1000的循环队列，实际就是对 ArrayBlockingQueue 的封装，队尾插入元素，空间不足时移除队首元素
+        this.recentCanceledQueue = new CircularQueue<Pair<Long, String>>(1000);
+        // 初始化最近注册队列，保存了最近注册实例的循环队列
+        this.recentRegisteredQueue = new CircularQueue<Pair<Long, String>>(1000);
+        // 初始化最近一分钟续约次数计数器
         this.renewsLastMin = new MeasuredRate(1000 * 60 * 1);
 
-        this.deltaRetentionTimer.schedule(getDeltaRetentionTask(),
+        // 创建定时任务，剔除掉最近变更队列中最近 180s 内没有发生变更的元素，默认30s调度一次
+        this.deltaRetentionTimer.schedule(
+                getDeltaRetentionTask(),
                 serverConfig.getDeltaRetentionTimerIntervalInMs(),
-                serverConfig.getDeltaRetentionTimerIntervalInMs());
+                serverConfig.getDeltaRetentionTimerIntervalInMs()
+        );
     }
 
     @Override
@@ -1210,14 +1233,16 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     }
 
     protected void postInit() {
+        // 启动最近一分钟续约计数器
         renewsLastMin.start();
         if (evictionTaskRef.get() != null) {
             evictionTaskRef.get().cancel();
         }
         evictionTaskRef.set(new EvictionTask());
+        // 启动定时任务，剔除下线实例
         evictionTimer.schedule(evictionTaskRef.get(),
                 serverConfig.getEvictionIntervalTimerInMs(),
-                serverConfig.getEvictionIntervalTimerInMs());
+                serverConfig.getEvictionIntervalTimerInMs()); // 每 60s 调度一次
     }
 
     /**
@@ -1236,7 +1261,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         return overriddenInstanceStatusMap.size();
     }
 
-    /* visible for testing */ class EvictionTask extends TimerTask {
+    /* visible for testing */
+    class EvictionTask extends TimerTask {
 
         private final AtomicLong lastExecutionNanosRef = new AtomicLong(0l);
 
@@ -1275,8 +1301,12 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
     }
 
-    /* visible for testing */ static class CircularQueue<E> extends AbstractQueue<E> {
+    /**
+     * 内部类，循环队列
+     */
+    static class CircularQueue<E> extends AbstractQueue<E> {
 
+        // 实际使用的还是 ArrayBlockingQueue
         private final ArrayBlockingQueue<E> delegate;
         private final int capacity;
 
@@ -1297,6 +1327,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
         @Override
         public boolean offer(E e) {
+            // 元素从队尾入队，容量满则移除队首元素再尝试入队
             while (!delegate.offer(e)) {
                 delegate.poll();
             }
@@ -1344,6 +1375,7 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
             public void run() {
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
                 while (it.hasNext()) {
+                    // 剔除掉 recentlyChangedQueue 中最近 180s 内没有变更过的元素
                     if (it.next().getLastUpdateTime() <
                             System.currentTimeMillis() - serverConfig.getRetentionTimeInMSInDeltaQueue()) {
                         it.remove();

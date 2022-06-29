@@ -50,6 +50,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * eureka-server 的启动类
+ * 在 {@link /eureka-server/src/main/webapp/WEB-INF/web.xml} 中配置为了监听器，会在 web 容器初始化完成后执行。
+ *
  * The class that kick starts the eureka server.
  *
  * <p>
@@ -102,6 +105,9 @@ public class EurekaBootStrap implements ServletContextListener {
     }
 
     /**
+     * 初始化 Eureka
+     *
+     * <p>
      * Initializes Eureka, including syncing up with other Eureka peers and publishing the registry.
      *
      * @see
@@ -110,7 +116,9 @@ public class EurekaBootStrap implements ServletContextListener {
     @Override
     public void contextInitialized(ServletContextEvent event) {
         try {
+            // 1. 初始化环境，暂不关注
             initEurekaEnvironment();
+            // 2. 初始化 eureka-server 上下文
             initEurekaServerContext();
 
             ServletContext sc = event.getServletContext();
@@ -142,9 +150,24 @@ public class EurekaBootStrap implements ServletContextListener {
     }
 
     /**
+     * 初始化 eureka-server 上下文。
+     *
+     * <p>
+     * 这里共涉及到了三类配置，分别是 EurekaServerConfig、EurekaInstanceConfig、EurekaClientConfig，
+     * EurekaServerConfig对应 eureka-server.properties 文件、后两个配置对应 eureka-client.properties 文件，它们在该文件中配置名称前缀分别为 instance 和 client。
+     *
+     * <ukl>
+     *     <li>EurekaServerConfig：描述的是对于 eureka-server 的配置</li>
+     *     <li>EurekaInstanceConfig：描述的是该服务作为一个应用本身的配置</li>
+     *     <li>EurekaClientConfig：描述的是对于 eureka-client 的配置</li>
+     * </ukl>
+     *
+     * <p>
      * init hook for server context. Override for custom logic.
      */
     protected void initEurekaServerContext() throws Exception {
+        // 1. 初始化 eureka-server 注册中心配置
+        // 面向接口的配置读取，将各个配置的读取封装为方法，如果配置改动只需要修改接口的实现即可
         EurekaServerConfig eurekaServerConfig = new DefaultEurekaServerConfig();
 
         // For backward compatibility
@@ -158,21 +181,32 @@ public class EurekaBootStrap implements ServletContextListener {
         ApplicationInfoManager applicationInfoManager = null;
 
         if (eurekaClient == null) {
+            // 2. 构造 eureka 实例配置，主要侧重于应用实例的元数据，如 ip、port、host等，包含 client 和 server
             EurekaInstanceConfig instanceConfig = isCloud(ConfigurationManager.getDeploymentContext())
                     ? new CloudInstanceConfig()
                     : new MyDataCenterInstanceConfig();
-            
-            applicationInfoManager = new ApplicationInfoManager(
-                    instanceConfig, new EurekaConfigBasedInstanceInfoProvider(instanceConfig).get());
-            
+
+            // 3. 创建 InstanceInfo 实例信息，这里使用了建造者模式来创建复杂对象
+            // 这里为了阅读方便，调整了下代码
+            InstanceInfo instanceInfo = new EurekaConfigBasedInstanceInfoProvider(instanceConfig).get();
+
+            // 4. 创建 ApplicationInfoManager 实例管理器，用于管理应用实例
+            applicationInfoManager = new ApplicationInfoManager(instanceConfig, instanceInfo);
+
+            // 5. 创建默认的客户端配置，主要侧重于 eureka-client 客户端的配置，比如拉取数据频率等
             EurekaClientConfig eurekaClientConfig = new DefaultEurekaClientConfig();
+
+            // 6. 创建 eureka-client，用于在集群模式下 eureka-server 之间的相互通信
             eurekaClient = new DiscoveryClient(applicationInfoManager, eurekaClientConfig);
         } else {
             applicationInfoManager = eurekaClient.getApplicationInfoManager();
         }
 
-        PeerAwareInstanceRegistry registry;
+        // 7. 创建可以感知集群实例变化的注册表
+        // PeerAwareInstanceRegistry，可以用来感知集群间应用实例的变化
+        PeerAwareInstanceRegistry registry; // registry 可以简单理解为它负责维护实例注册表和集群之间的应用实例感知
         if (isAws(applicationInfoManager.getInfo())) {
+            // AWS 亚马逊定制，不关注
             registry = new AwsInstanceRegistry(
                     eurekaServerConfig,
                     eurekaClient.getEurekaClientConfig(),
@@ -182,6 +216,9 @@ public class EurekaBootStrap implements ServletContextListener {
             awsBinder = new AwsBinderDelegate(eurekaServerConfig, eurekaClient.getEurekaClientConfig(), registry, applicationInfoManager);
             awsBinder.start();
         } else {
+            // 这里的实现是 PeerAwareInstanceRegistryImpl，
+            // 它是 PeerAwareInstanceRegistry 接口的实现类，还继承了 AbstractInstanceRegistry 抽象类，
+            // 因此它同时具有管理应用实例注册表和感知集群间应用实例变化的功能
             registry = new PeerAwareInstanceRegistryImpl(
                     eurekaServerConfig,
                     eurekaClient.getEurekaClientConfig(),
@@ -190,6 +227,8 @@ public class EurekaBootStrap implements ServletContextListener {
             );
         }
 
+        // 8. 创建 eureka-server 集群信息
+        // peerEurekaNodes，用来提供集群节点间操作的一些基础功能，它内部包含了所有集群节点
         PeerEurekaNodes peerEurekaNodes = getPeerEurekaNodes(
                 registry,
                 eurekaServerConfig,
@@ -198,6 +237,8 @@ public class EurekaBootStrap implements ServletContextListener {
                 applicationInfoManager
         );
 
+        // 9. 创建 eureka-server 上下文
+        // 所谓的上下文就是把上面的一系列对象都给包含进去了，在整个生命周期中就可以从上下文中直接找到所需对象
         serverContext = new DefaultEurekaServerContext(
                 eurekaServerConfig,
                 serverCodecs,
@@ -206,15 +247,21 @@ public class EurekaBootStrap implements ServletContextListener {
                 applicationInfoManager
         );
 
+        // eureka-server 上下文持有者，其它地方就可以直接通过 EurekaServerContextHolder 拿到上下文
         EurekaServerContextHolder.initialize(serverContext);
 
+        // 10. 初始化 eureka-server 上下文
         serverContext.initialize();
         logger.info("Initialized server context");
 
+        // 11. 立刻从集群中的相邻节点同步注册表
         // Copy registry from neighboring eureka node
         int registryCount = registry.syncUp();
+
+        // 12. 启动，更新一些变量，启动一些定时任务
         registry.openForTraffic(applicationInfoManager, registryCount);
 
+        // 13. 注册监控统计
         // Register all monitoring statistics.
         EurekaMonitors.registerAllStats();
     }

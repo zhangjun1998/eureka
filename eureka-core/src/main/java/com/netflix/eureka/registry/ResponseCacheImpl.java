@@ -112,11 +112,22 @@ public class ResponseCacheImpl implements ResponseCache {
                 }
             });
 
-    private final ConcurrentMap<Key, Value> readOnlyCacheMap = new ConcurrentHashMap<Key, Value>();
+    /**
+     * 三级缓存结构设计，避免写操作阻塞读操作，降低读写并发
+     * 三级缓存的结构虽然可以提高性能，但是由于各级缓存不能及时刷新，因此它不能保证及时性，也就导致多节点之间可能会出现数据不一致问题(只能达到最终一致)，所以 eureka 只保证了 AP
+     * 可以通过提高一级缓存的刷新频率来降低数据不一致问题发生的概率，或者直接关闭一级缓存，但是会稍微降低性能(个人觉得影响不大，guava cache 这种基于内存的缓存指定是能抗住的)
+     */
 
+    // 一级缓存，从二级缓存中加载
+    private final ConcurrentMap<Key, Value> readOnlyCacheMap = new ConcurrentHashMap<Key, Value>();
+    // 二级缓存，从三级缓存中加载
     private final LoadingCache<Key, Value> readWriteCacheMap;
-    private final boolean shouldUseReadOnlyResponseCache;
+    // 三级缓存
     private final AbstractInstanceRegistry registry;
+
+    // 是否开启三级缓存(只读缓存)
+    private final boolean shouldUseReadOnlyResponseCache;
+
     private final EurekaServerConfig serverConfig;
     private final ServerCodecs serverCodecs;
 
@@ -152,7 +163,9 @@ public class ResponseCacheImpl implements ResponseCache {
                             }
                         });
 
+        // 开启三级缓存时
         if (shouldUseReadOnlyResponseCache) {
+            // 定时器，30秒一次，更新三级缓存中的数据
             timer.schedule(getCacheUpdateTask(),
                     new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
                             + responseCacheUpdateIntervalMs),
