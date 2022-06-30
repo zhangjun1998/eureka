@@ -47,10 +47,10 @@ import com.thoughtworks.xstream.annotations.XStreamAlias;
 import com.thoughtworks.xstream.annotations.XStreamImplicit;
 
 /**
- * 封装了所有从 eureka-server 返回的注册信息，它的结构划分如下：
- * InstanceInfo：应用实例信息
- * Application：包含了单个 eureka-server 的所有应用实例信息
- * Applications：包含了所有 eureka-server 的信息
+ * eureka 客户端的本地注册表，它的结构划分如下：
+ * InstanceInfo：表示某个实例节点
+ * Application：表示某个服务，其中包含该服务的所有实例节点数据
+ * Applications：表示所有服务，其中包含所有服务的数据
  *
  * <p>
  * The class that wraps all the registry information returned by eureka server.
@@ -70,6 +70,7 @@ import com.thoughtworks.xstream.annotations.XStreamImplicit;
 @XStreamAlias("applications")
 @JsonRootName("applications")
 public class Applications {
+
     private static class VipIndexSupport {
         final AbstractQueue<InstanceInfo> instances = new ConcurrentLinkedQueue<>();
         final AtomicLong roundRobinIndex = new AtomicLong(0);
@@ -86,13 +87,17 @@ public class Applications {
 
     private static final String STATUS_DELIMITER = "_";
 
+    // 本地注册表的 hashcode，用于校验本地注册表和 server 注册表是否一致
     private String appsHashCode;
+    // 增量拉取注册表的版本号
     private Long versionDelta;
+
     @XStreamImplicit
-    // 将所有 eureka-server 节点 Application 都保存了一份到 ConcurrentLinkedQueue 中
+    // 将所有应用实例 Application 都保存了一份到 ConcurrentLinkedQueue 中
     private final AbstractQueue<Application> applications;
-    // 又按照 eureka-server 节点来划分在 ConcurrentHashMap 中存了一份
+    // 按照服务名称保存的本地注册表信息，key=服务名称，value=所有服务实例
     private final Map<String, Application> appNameApplicationMap;
+
     private final Map<String, VipIndexSupport> virtualHostNameAppMap;
     private final Map<String, VipIndexSupport> secureVirtualHostNameAppMap;
 

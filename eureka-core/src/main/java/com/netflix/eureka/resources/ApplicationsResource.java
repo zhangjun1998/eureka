@@ -62,7 +62,9 @@ public class ApplicationsResource {
     private static final String HEADER_JSON_VALUE = "json";
 
     private final EurekaServerConfig serverConfig;
+    // 注册表
     private final PeerAwareInstanceRegistry registry;
+    // 注册表响应缓存
     private final ResponseCache responseCache;
 
     @Inject
@@ -99,6 +101,9 @@ public class ApplicationsResource {
     }
 
     /**
+     * 全量拉取注册表请求入口
+     *
+     * <p>
      * Get information about all {@link com.netflix.discovery.shared.Applications}.
      *
      * @param version the version of the request.
@@ -134,9 +139,12 @@ public class ApplicationsResource {
         // Check if the server allows the access to the registry. The server can
         // restrict access if it is not
         // ready to serve traffic depending on various reasons.
+        // 权限认证
         if (!registry.shouldAllowAccess(isRemoteRegionRequested)) {
             return Response.status(Status.FORBIDDEN).build();
         }
+
+        // 响应数据类型，json/xml，默认 xml
         CurrentRequestVersion.set(Version.toEnum(version));
         KeyType keyType = Key.KeyType.JSON;
         String returnMediaType = MediaType.APPLICATION_JSON;
@@ -145,26 +153,38 @@ public class ApplicationsResource {
             returnMediaType = MediaType.APPLICATION_XML;
         }
 
-        Key cacheKey = new Key(Key.EntityType.Application,
+        // 全量拉取注册表的缓存key
+        Key cacheKey = new Key(
+                Key.EntityType.Application,
                 ResponseCacheImpl.ALL_APPS,
-                keyType, CurrentRequestVersion.get(), EurekaAccept.fromString(eurekaAccept), regions
+                keyType,
+                CurrentRequestVersion.get(),
+                EurekaAccept.fromString(eurekaAccept),
+                regions
         );
 
+        // 从注册表的响应缓存中获取全量注册表数据并返回
+
+        // 返回压缩后的数据
         Response response;
         if (acceptEncoding != null && acceptEncoding.contains(HEADER_GZIP_VALUE)) {
             response = Response.ok(responseCache.getGZIP(cacheKey))
                     .header(HEADER_CONTENT_ENCODING, HEADER_GZIP_VALUE)
                     .header(HEADER_CONTENT_TYPE, returnMediaType)
                     .build();
-        } else {
-            response = Response.ok(responseCache.get(cacheKey))
-                    .build();
+        }
+        // 返回未压缩的数据
+        else {
+            response = Response.ok(responseCache.get(cacheKey)).build();
         }
         CurrentRequestVersion.remove();
         return response;
     }
 
     /**
+     * 增量拉取注册表请求入口
+     *
+     * <p>
      * Get information about all delta changes in {@link com.netflix.discovery.shared.Applications}.
      *
      * <p>
@@ -205,6 +225,7 @@ public class ApplicationsResource {
 
         // If the delta flag is disabled in discovery or if the lease expiration
         // has been disabled, redirect clients to get all instances
+        // 权限认证
         if ((serverConfig.shouldDisableDelta()) || (!registry.shouldAllowAccess(isRemoteRegionRequested))) {
             return Response.status(Status.FORBIDDEN).build();
         }
@@ -218,6 +239,7 @@ public class ApplicationsResource {
             EurekaMonitors.GET_ALL_DELTA_WITH_REMOTE_REGIONS.increment();
         }
 
+        // 响应类型，默认 xml
         CurrentRequestVersion.set(Version.toEnum(version));
         KeyType keyType = Key.KeyType.JSON;
         String returnMediaType = MediaType.APPLICATION_JSON;
@@ -226,19 +248,28 @@ public class ApplicationsResource {
             returnMediaType = MediaType.APPLICATION_XML;
         }
 
-        Key cacheKey = new Key(Key.EntityType.Application,
+        // 增量拉取注册表的缓存key
+        Key cacheKey = new Key(
+                Key.EntityType.Application,
                 ResponseCacheImpl.ALL_APPS_DELTA,
-                keyType, CurrentRequestVersion.get(), EurekaAccept.fromString(eurekaAccept), regions
+                keyType,
+                CurrentRequestVersion.get(),
+                EurekaAccept.fromString(eurekaAccept),
+                regions
         );
 
+        // 从注册表的响应缓存中获取增量注册表数据并返回
         final Response response;
 
+        // 返回压缩后的数据
         if (acceptEncoding != null && acceptEncoding.contains(HEADER_GZIP_VALUE)) {
              response = Response.ok(responseCache.getGZIP(cacheKey))
                     .header(HEADER_CONTENT_ENCODING, HEADER_GZIP_VALUE)
                     .header(HEADER_CONTENT_TYPE, returnMediaType)
                     .build();
-        } else {
+        }
+        // 返回未压缩的数据
+        else {
             response = Response.ok(responseCache.get(cacheKey)).build();
         }
 
