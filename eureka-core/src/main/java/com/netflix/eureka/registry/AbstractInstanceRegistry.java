@@ -81,23 +81,23 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
 
     private static final String[] EMPTY_STR_ARRAY = new String[0];
 
-    // 注册表，key=服务名称，value=[实例id-续约信息]，主要是一个服务可能会部署多个实例节点，因此需要根据实例id来区分
-    private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
-
     protected Map<String, RemoteRegionRegistry> regionNameVSRemoteRegistry = new HashMap<String, RemoteRegionRegistry>();
     protected final ConcurrentMap<String, InstanceStatus> overriddenInstanceStatusMap = CacheBuilder
             .newBuilder().initialCapacity(500)
             .expireAfterAccess(1, TimeUnit.HOURS)
             .<String, InstanceStatus>build().asMap();
 
+    // 注册表，key=服务名称，value=[实例id-续约信息]，主要是一个服务可能会部署多个实例节点，因此需要根据实例id来区分
+    private final ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>> registry = new ConcurrentHashMap<String, Map<String, Lease<InstanceInfo>>>();
+
     // 最近注册队列，默认容量为1000的循环队列
     private final CircularQueue<Pair<Long, String>> recentRegisteredQueue;
     // 最近下线队列，默认容量为1000的循环队列
     private final CircularQueue<Pair<Long, String>> recentCanceledQueue;
-    // 最近变更队列，基于链表的无界队列
+    // 最近变更队列，基于链表的无界队列，用来存储注册表的增量数据，配合实现增量拉取注册表
     private ConcurrentLinkedQueue<RecentlyChangedItem> recentlyChangedQueue = new ConcurrentLinkedQueue<>();
 
-    // 读写锁
+    // 注册表读写锁
     private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();
     private final Lock read = readWriteLock.readLock();
     private final Lock write = readWriteLock.writeLock();
@@ -144,9 +144,12 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         // 初始化最近一分钟续约次数计数器
         this.renewsLastMin = new MeasuredRate(1000 * 60 * 1);
 
-        // 创建定时任务，剔除掉最近变更队列中最近 180s 内没有发生变更的元素，默认30s调度一次
+        // 初始化增量数据维护任务，剔除掉最近变更队列中最近 180s 内没有发生变更的元素，默认30s调度一次
+        // 客户端拉取注册表的间隔是30s，心跳间隔也是30s，这里每30s调度一次剔除180s内没有变更的元素，可以保证队列中存在的都是增量数据
         this.deltaRetentionTimer.schedule(
+                // 注册表增量数据的维护任务
                 getDeltaRetentionTask(),
+                // 默认30s调度一次，首次执行延迟30s
                 serverConfig.getDeltaRetentionTimerIntervalInMs(),
                 serverConfig.getDeltaRetentionTimerIntervalInMs()
         );
@@ -920,6 +923,9 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     }
 
     /**
+     * 获取注册表的增量数据
+     *
+     * <p>
      * Get the registry information about the delta changes. The deltas are
      * cached for a window specified by
      * {@link EurekaServerConfig#getRetentionTimeInMSInDeltaQueue()}. Subsequent
@@ -934,15 +940,19 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
     @Deprecated
     public Applications getApplicationDeltas() {
         GET_ALL_CACHE_MISS_DELTA.increment();
+        // 需要返回的增量注册表
         Applications apps = new Applications();
         apps.setVersion(responseCache.getVersionDelta().get());
         Map<String, Application> applicationInstancesMap = new HashMap<String, Application>();
+        // 加写锁
         write.lock();
         try {
+            // 遍历最近变更队列中的所有元素，这些就是增量数据
             Iterator<RecentlyChangedItem> iter = this.recentlyChangedQueue.iterator();
             logger.debug("The number of elements in the delta queue is : {}",
                     this.recentlyChangedQueue.size());
             while (iter.hasNext()) {
+                // 获取实例信息并添加到需要返回的增量注册表中
                 Lease<InstanceInfo> lease = iter.next().getLeaseInfo();
                 InstanceInfo instanceInfo = lease.getHolder();
                 logger.debug(
@@ -975,6 +985,8 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
                 }
             }
 
+            // 获取注册表中的所有服务实例，计算 hashcode
+            // 用于返回给客户端作比对，判断客户端注册表是否与 server 中一致
             Applications allApps = getApplications(!disableTransparentFallback);
             apps.setAppsHashCode(allApps.getReconcileHashCode());
             return apps;
@@ -1412,14 +1424,18 @@ public abstract class AbstractInstanceRegistry implements InstanceRegistry {
         return rule.apply(r, existingLease, isReplication).status();
     }
 
+    /**
+     * 注册表增量数据的维护任务
+     */
     private TimerTask getDeltaRetentionTask() {
         return new TimerTask() {
 
             @Override
             public void run() {
                 Iterator<RecentlyChangedItem> it = recentlyChangedQueue.iterator();
+                // 遍历最近变更队列所有元素
                 while (it.hasNext()) {
-                    // 剔除掉 recentlyChangedQueue 中最近 180s 内没有变更过的元素
+                    // 移除掉 recentlyChangedQueue 中最近 180s 内没有变更过的元素
                     if (it.next().getLastUpdateTime() <
                             System.currentTimeMillis() - serverConfig.getRetentionTimeInMSInDeltaQueue()) {
                         it.remove();

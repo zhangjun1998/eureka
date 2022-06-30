@@ -4,6 +4,9 @@ import javax.annotation.Nullable;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
+ * 拉取注册表响应缓存接口
+ *
+ * <p>
  * @author David Liu
  */
 public interface ResponseCache {

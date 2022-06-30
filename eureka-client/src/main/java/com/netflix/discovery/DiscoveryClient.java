@@ -165,7 +165,7 @@ public class DiscoveryClient implements EurekaClient {
     private final AtomicReference<Applications> localRegionApps = new AtomicReference<>();
     // 拉取注册表的锁
     private final Lock fetchRegistryUpdateLock = new ReentrantLock();
-    // 拉取注册表版本号，保证注册表不会被错误的重置为旧版本
+    // 注册表拉取版本号，保证拉取注册表时不会错误的重置为旧版本
     private final AtomicLong fetchRegistryGeneration;
     // 应用实例管理器
     private final ApplicationInfoManager applicationInfoManager;
@@ -510,7 +510,7 @@ public class DiscoveryClient implements EurekaClient {
         // 3.3 需要的话则从集群中的其它节点拉取注册表信息
         if (clientConfig.shouldFetchRegistry()) {
             try {
-                // 从其它节点拉取注册表信息，默认不进行强制拉取
+                // 从其它节点拉取注册表信息，全量 或 增量，启动时全量拉取
                 boolean primaryFetchRegistryResult = fetchRegistry(false);
                 if (!primaryFetchRegistryResult) {
                     logger.info("Initial registry fetch from primary servers failed");
@@ -1063,7 +1063,7 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * 从集群中的其它节点拉取注册表信息
+     * 从集群中的其它节点 全量/增量 拉取注册表信息
      *
      * <p>
      * Fetches the registry information.
@@ -1080,18 +1080,24 @@ public class DiscoveryClient implements EurekaClient {
     private boolean fetchRegistry(boolean forceFullRegistryFetch) {
         Stopwatch tracer = FETCH_REGISTRY_TIMER.start();
 
-        // 1. 拉数据
+        // 1. 拉取注册表
         try {
             // If the delta is disabled or if it is the first time, get all
             // applications
             Applications applications = getApplications();
 
-            // 满足以下任意条件之一就会全量拉取数据
-            if (clientConfig.shouldDisableDelta() // 是否拉取过期数据；默认false
-                    || (!Strings.isNullOrEmpty(clientConfig.getRegistryRefreshSingleVipAddress())) // 客户端是否仅对单个VIP的注册表信息感兴趣；默认为null，即false
-                    || forceFullRegistryFetch // 是否强制拉取；默认false
-                    || (applications == null) // applications 是否为null；默认会初始化为空集合，即false
-                    || (applications.getRegisteredApplications().size() == 0) // 当前注册表中已有的实例信息数量是否为空；启动时为空，即true，正常运行时为 false
+            // 满足以下任意条件之一就会全量拉取注册表
+            if (
+                    // 禁止增量拉取，默认false
+                    clientConfig.shouldDisableDelta()
+                    // ？，默认为null，即false
+                    || (!Strings.isNullOrEmpty(clientConfig.getRegistryRefreshSingleVipAddress()))
+                    // 是否强制进行全量拉取；默认false
+                    || forceFullRegistryFetch
+                    // applications 是否为null；默认会初始化为空集合，即false
+                    || (applications == null)
+                    // 当前注册表中已有的实例信息数量是否为空；启动时为空，即true，正常运行时为 false
+                    || (applications.getRegisteredApplications().size() == 0)
                     || (applications.getVersion() == -1)) //Client application does not have latest library supporting delta
             {
                 logger.info("Disable delta property : {}", clientConfig.shouldDisableDelta());
@@ -1105,14 +1111,14 @@ public class DiscoveryClient implements EurekaClient {
                 getAndStoreFullRegistry();
             }
 
-            // 否则增量拉取数据
+            // 不满足全量拉取条件，增量拉取注册表
             // 一般只有在启动时或者断线重连时候才会进行全量拉取，运行中一般都是增量拉取，否则性能太低
             else {
-                // 进行增量拉取
                 getAndUpdateDelta(applications);
             }
 
-            // 计算拉取后 applications 的 hashcode，通过 hashCode 来判断当前节点的数据和其它节点的数据是否一致，如果不一致说明有数据没拉取成功
+            // 计算拉取后 applications 的 hashcode
+            // 通过 hashCode 来判断当前节点的数据和其它节点的数据是否一致，如果不一致说明注册表同步失败
             applications.setAppsHashCode(applications.getReconcileHashCode());
             logTotalInstances();
         } catch (Throwable e) {
@@ -1195,27 +1201,32 @@ public class DiscoveryClient implements EurekaClient {
      *             on error.
      */
     private void getAndStoreFullRegistry() throws Throwable {
+        // 注册表版本号，防止出现错误覆盖注册表
         long currentUpdateGeneration = fetchRegistryGeneration.get();
 
         logger.info("Getting all instance registry info from the eureka server");
 
-        // 通过 HTTP 请求拉取数据
+        // 全量拉取注册表
         Applications apps = null;
         EurekaHttpResponse<Applications> httpResponse = clientConfig.getRegistryRefreshSingleVipAddress() == null
+                // 调用 eureka-server 节点的 Rest 接口全量抓取注册表
+                // 接口路径为 /apps
                 ? eurekaTransport.queryClient.getApplications(remoteRegionsRef.get())
                 : eurekaTransport.queryClient.getVip(clientConfig.getRegistryRefreshSingleVipAddress(), remoteRegionsRef.get());
         if (httpResponse.getStatusCode() == Status.OK.getStatusCode()) {
+            // 获取 HTTP 响应返回的 Applications
             apps = httpResponse.getEntity();
         }
         logger.info("The response status is {}", httpResponse.getStatusCode());
 
-        // 拉取失败，日志告警
+        // 若拉取失败，日志告警
         if (apps == null) {
             logger.error("The application is null for some reason. Not storing this information");
         }
-        // CAS 操作，增加拉取次数，若增加成功说明没有并发安全问题，当前拉取结果可以直接覆盖的原来数据，否则说明在本次拉取期间发生了拉取动作，本次拉取无效
+
+        // CAS 操作修改拉取注册表版本号，若增加成功说明没有并发安全问题，当前拉取结果可以直接覆盖的原来数据，否则说明在本次拉取期间发生了拉取动作，本次拉取无效
         else if (fetchRegistryGeneration.compareAndSet(currentUpdateGeneration, currentUpdateGeneration + 1)) {
-            // 直接覆盖原数据
+            // 全量拉取，直接覆盖本地注册表即可
             localRegionApps.set(this.filterAndShuffle(apps));
             logger.debug("Got full registry with apps hashcode {}", apps.getAppsHashCode());
         } else {
@@ -1240,31 +1251,37 @@ public class DiscoveryClient implements EurekaClient {
      * @throws Throwable on error
      */
     private void getAndUpdateDelta(Applications applications) throws Throwable {
+        // 注册表版本号
         long currentUpdateGeneration = fetchRegistryGeneration.get();
 
+        // 使用 eurekaTransport 对象中封装的方法从 server 增量拉取注册表
         Applications delta = null;
         EurekaHttpResponse<Applications> httpResponse = eurekaTransport.queryClient.getDelta(remoteRegionsRef.get());
+
+        // 若拉取成功，从 HTTP 响应中获取注册表增量数据
         if (httpResponse.getStatusCode() == Status.OK.getStatusCode()) {
             delta = httpResponse.getEntity();
         }
 
-        // 增量拉取失败，进行全量拉取
+        // 若增量拉取失败，进行全量拉取
         if (delta == null) {
             logger.warn("The server does not allow the delta revision to be applied because it is not safe. "
                     + "Hence got the full registry.");
             getAndStoreFullRegistry();
         }
-        // CAS 操作，增加拉取次数，若增加成功说明没有并发安全问题，当前拉取结果可以直接覆盖的原来数据，否则说明在本次拉取期间发生了拉取动作，本次拉取无效
+
+        // CAS 修改注册表拉取版本号，若增加成功说明没有并发安全问题，当前拉取结果可以使用，否则说明在本次拉取期间又发生了拉取动作，本次拉取无效
         else if (fetchRegistryGeneration.compareAndSet(currentUpdateGeneration, currentUpdateGeneration + 1)) {
             logger.debug("Got delta update with apps hashcode {}", delta.getAppsHashCode());
             String reconcileHashCode = "";
 
-            // 这里比全量拉取多了一个 ReentrantLock 加锁的逻辑，主要是因为增量拉取需要修改原来的注册表，而这个操作可能和注册表中应用实例过期的操作同时执行导致并发问题，全量拉取是直接覆盖则不会有并发问题
+            // 这里比全量拉取多了一个 ReentrantLock 加锁的逻辑，防止出现并发拉取注册表操作时出问题
+            // 全量拉取是直接覆盖本地注册表，不会有并发问题
             if (fetchRegistryUpdateLock.tryLock()) {
                 try {
-                    // 更新注册表
+                    // 合并增量数据到本地注册表
                     updateDelta(delta);
-                    // 更新后的注册表的 hashCode
+                    // 计算合并后本地注册表的 hashCode
                     reconcileHashCode = getReconcileHashCode(applications);
                 } finally {
                     fetchRegistryUpdateLock.unlock();
@@ -1272,10 +1289,9 @@ public class DiscoveryClient implements EurekaClient {
             } else {
                 logger.warn("Cannot acquire update lock, aborting getAndUpdateDelta");
             }
-            // There is a diff in number of instances for some reason
-            // 如果更新后的注册表的 hashCode 与 其它节点注册表的 hashCode 不一致，说明节点之间的实例数据有差异
+            // 如果本地注册表的 hashCode 与 server 中注册表的 hashCode 不一致，说明注册表同步失败
             if (!reconcileHashCode.equals(delta.getAppsHashCode()) || clientConfig.shouldLogDeltaDiff()) {
-                // 存在差异，会进行一次全量拉取
+                // 注册表增量同步失败，进行全量拉取
                 reconcileAndLogDifference(delta, reconcileHashCode);  // this makes a remoteCall
             }
         } else {
@@ -1347,7 +1363,7 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * 更新注册表的增量数据
+     * 合并增量拉取的注册表到本地注册表
      *
      * <p>
      * Updates the delta information fetches from the eureka server into the
@@ -1373,39 +1389,40 @@ public class DiscoveryClient implements EurekaClient {
                 }
 
                 ++deltaCount;
+
+                // 将增量拉取到的注册表数据分类处理：新增、变更、下线
+
                 // 新增的实例
                 if (ActionType.ADDED.equals(instance.getActionType())) {
+                    // 根据服务名称从本地注册表中查询服务
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
+                    // 本地注册表中不存在该服务时，创建
                     if (existingApp == null) {
                         applications.addApplication(app);
                     }
                     logger.debug("Added instance {} to the existing apps in region {}", instance.getId(), instanceRegion);
-                    // 向注册表中增加实例信息
+                    // 向本地注册表中增加该实例信息
                     applications.getRegisteredApplications(instance.getAppName()).addInstance(instance);
                 }
-                // 出现变更的实例
+                // 变更的实例
                 else if (ActionType.MODIFIED.equals(instance.getActionType())) {
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
                     if (existingApp == null) {
                         applications.addApplication(app);
                     }
                     logger.debug("Modified instance {} to the existing apps ", instance.getId());
-                    // 向注册表中使用新的实例信息覆盖原信息
+                    // 向注册表中使用新的实例信息覆盖原实例
                     applications.getRegisteredApplications(instance.getAppName()).addInstance(instance);
                 }
                 // 删除的实例
                 else if (ActionType.DELETED.equals(instance.getActionType())) {
-                    // 先找到该实例所在的 Application
+                    // 先找到该实例所在的服务
                     Application existingApp = applications.getRegisteredApplications(instance.getAppName());
+                    // 如果实例对应的服务存在，从该服务中移除该实例信息
                     if (existingApp != null) {
                         logger.debug("Deleted instance {} to the existing apps ", instance.getId());
-                        // 从该 Application 中移除该实例
                         existingApp.removeInstance(instance);
-                        /*
-                         * We find all instance list from application(The status of instance status is not only the status is UP but also other status)
-                         * if instance list is empty, we remove the application.
-                         */
-                        // 如果该 Application 下没有其它实例了，那么将该 Application 从 applications 中移除
+                        // 如果该服务下没有其它实例了，那么将该服务也从本地注册表中移除
                         if (existingApp.getInstancesAsIsFromEureka().isEmpty()) {
                             applications.removeApplication(existingApp);
                         }
@@ -1415,6 +1432,7 @@ public class DiscoveryClient implements EurekaClient {
         }
         logger.debug("The total number of instances fetched by the delta processor : {}", deltaCount);
 
+        // 更新增量拉取注册表的版本号
         getApplications().setVersion(delta.getVersion());
         getApplications().shuffleInstances(clientConfig.shouldFilterOnlyUpInstances());
 
@@ -1430,21 +1448,23 @@ public class DiscoveryClient implements EurekaClient {
      * Initializes all scheduled tasks.
      */
     private void initScheduledTasks() {
-        // 1. 需要从其它注册中心拉取注册表，缓存刷新任务(拉取注册表)
+        // 1. 需要从其它注册中心拉取注册表，缓存刷新任务(本地注册表)
         if (clientConfig.shouldFetchRegistry()) {
             // 注册表的拉取间隔，默认30s
             int registryFetchIntervalSeconds = clientConfig.getRegistryFetchIntervalSeconds();
             // 该值与延迟时间相乘可得最大延迟时间，默认为10
             int expBackOffBound = clientConfig.getCacheRefreshExecutorExponentialBackOffBound();
-            // 创建缓存刷新任务(拉取注册表)
+            // 创建缓存刷新任务(本地注册表)
             cacheRefreshTask = new TimedSupervisorTask(
                     "cacheRefresh",
                     scheduler,
                     cacheRefreshExecutor,
+                    // 默认每 30s 调度一次
                     registryFetchIntervalSeconds,
                     TimeUnit.SECONDS,
                     expBackOffBound,
-                    new CacheRefreshThread() // 注册表拉取任务
+                    // 注册表拉取任务
+                    new CacheRefreshThread()
             );
             // 丢到调度线程池中执行，默认 30s 调度一次，可配置
             // 也就是说注册表的拉取频率是 30s 一次，而由于三级缓存结构，就可能会导致数据不一致的问题(只能保证最终一致性)，因此可以通过减小拉取间隔来降低不一致的概率
@@ -1647,7 +1667,7 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
-     * 缓存刷新任务
+     * 本地注册表缓存刷新任务
      *
      * <p>
      * The task that fetches the registry information at specified intervals.
@@ -1658,6 +1678,9 @@ public class DiscoveryClient implements EurekaClient {
         }
     }
 
+    /**
+     * 刷新本地注册表缓存
+     */
     @VisibleForTesting
     void refreshRegistry() {
         try {

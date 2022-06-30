@@ -16,6 +16,8 @@
 + [x] EurekaInstanceConfig
 + [x] EurekaClientConfig
 + [x] InstanceInfo
++ [x] Application
++ [x] Applications
 + [x] ApplicationInfoManager
 + [x] EurekaClient
 + [x] EurekaConfigBasedInstanceInfoProvider
@@ -29,6 +31,11 @@
 + [x] PeerEurekaNodes
 + [x] EurekaServerContext
 + [x] DefaultEurekaServerContext
++ [x] ResponseCache
++ [x] ResponseCacheImpl
++ [x] ApplicationResource
++ [x] ApplicationsResource
++ [x] InstanceResource
 + [ ] ...
 + 
 

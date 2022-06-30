@@ -58,6 +58,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
+ * 拉取注册表的响应缓存实现类
+ * 在 eureka-client 从 eureka-server 中拉取注册表时，会从注册表响应缓存中取数据，
+ * 缓存的主要作用是实现读写分离，降低拉取注册表操作和维护注册表操作之间出现读写冲突的概率，快速响应客户端抓取注册表的请求。
+ *
  * The class that is responsible for caching registry information that will be
  * queried by the clients.
  *
@@ -113,34 +117,63 @@ public class ResponseCacheImpl implements ResponseCache {
             });
 
     /**
-     * 三级缓存结构设计，避免写操作阻塞读操作，降低读写并发
-     * 三级缓存的结构虽然可以提高性能，但是由于各级缓存不能及时刷新，因此它不能保证及时性，也就导致多节点之间可能会出现数据不一致问题(只能达到最终一致)，所以 eureka 只保证了 AP
-     * 可以通过提高一级缓存的刷新频率来降低数据不一致问题发生的概率，或者直接关闭一级缓存，但是会稍微降低性能(个人觉得影响不大，guava cache 这种基于内存的缓存指定是能抗住的)
+     * 三级缓存的设计：
+     * <ol>
+     *     <li>避免写操作阻塞读操作，降低读写并发</li>
+     *     <li>三级缓存的结构虽然可以提高性能，但是由于各级缓存不能及时刷新，因此它不能保证及时性，也就导致多节点之间可能会出现数据不一致问题(只能达到最终一致)，所以 eureka 只保证了 AP</li>
+     *     <li>可以通过提高一级缓存的刷新频率来降低数据不一致问题发生的概率，或者直接关闭一级缓存，但是会稍微降低性能(个人觉得影响不大，guava cache 这种基于内存的缓存指定是能抗住的)</li>
+     * </ol>
      */
 
-    // 一级缓存，从二级缓存中加载
+    /**
+     * 缓存的过期逻辑：
+     * <li>服务注册成功后会主动清理相关的注册表缓存</li>
+     * <li>读写缓存在写入后180s自动过期</li>
+     * <li>每30s调度一次的定时任务会自动更新只读缓存</li>
+     */
+
+    /**
+     * 官方彩蛋，最为致命：
+     * 读写缓存的默认过期时间是 180s，而心跳续约的默认间隔是 30s，3个心跳周期也就是 90s 没有收到就认为实例下线了，
+     * 如果客户端拉取注册表时读写缓存正好刚刚加载完毕，那么此时读取的还是读写缓存中的旧数据，
+     * 也就是说服务下线后在最好的情况下客户端可以在 0~30s 内立即得知，在最差的情况下则需要等待读写缓存过期即 180s。
+     *
+     * eureka-server 在3个心跳周期即 90s 内没有收到心跳则认为服务下线，但是 eureka-client 客户端可能需要 180s 才可以感知到。
+     *
+     * 官方彩蛋，最为致命，务必小心
+     */
+
+    // 一级缓存，基于 ConcurrentHashMap 的只读缓存，拉取注册表时默认从一级缓存中获取，有定时任务每30s更新一次缓存
+    // 一级缓存获取注册表失败则会走二级缓存获取，并将获取结果回填到一级缓存
     private final ConcurrentMap<Key, Value> readOnlyCacheMap = new ConcurrentHashMap<Key, Value>();
-    // 二级缓存，从三级缓存中加载
+    // 二级缓存，基于 Guava Cache 的读写缓存，默认在写入后 180s 过期，获取缓存不存在时会自动从注册表中加载
     private final LoadingCache<Key, Value> readWriteCacheMap;
-    // 三级缓存
+    // 三级缓存，注册表
     private final AbstractInstanceRegistry registry;
 
-    // 是否开启三级缓存(只读缓存)
+    // 是否启用只读缓存，默认 true
     private final boolean shouldUseReadOnlyResponseCache;
 
+    // eureka-server 配置
     private final EurekaServerConfig serverConfig;
+    // 编解码器，用来支持 json/xml 格式的响应
     private final ServerCodecs serverCodecs;
 
     ResponseCacheImpl(EurekaServerConfig serverConfig, ServerCodecs serverCodecs, AbstractInstanceRegistry registry) {
+        // 初始化本地变量
         this.serverConfig = serverConfig;
         this.serverCodecs = serverCodecs;
         this.shouldUseReadOnlyResponseCache = serverConfig.shouldUseReadOnlyResponseCache();
         this.registry = registry;
 
-        long responseCacheUpdateIntervalMs = serverConfig.getResponseCacheUpdateIntervalMs();
+        // 初始化读写缓存
         this.readWriteCacheMap =
-                CacheBuilder.newBuilder().initialCapacity(serverConfig.getInitialCapacityOfResponseCache())
+                CacheBuilder.newBuilder()
+                        // 容量默认1000，可以包含各种 Key，完全够用了
+                        .initialCapacity(serverConfig.getInitialCapacityOfResponseCache())
+                        // 过期时间，默认写入后的 180s 自动过期
                         .expireAfterWrite(serverConfig.getResponseCacheAutoExpirationInSeconds(), TimeUnit.SECONDS)
+                        // 缓存移除回调
                         .removalListener(new RemovalListener<Key, Value>() {
                             @Override
                             public void onRemoval(RemovalNotification<Key, Value> notification) {
@@ -151,6 +184,7 @@ public class ResponseCacheImpl implements ResponseCache {
                                 }
                             }
                         })
+                        // 缓存自动加载
                         .build(new CacheLoader<Key, Value>() {
                             @Override
                             public Value load(Key key) throws Exception {
@@ -158,18 +192,27 @@ public class ResponseCacheImpl implements ResponseCache {
                                     Key cloneWithNoRegions = key.cloneWithoutRegions();
                                     regionSpecificKeys.put(cloneWithNoRegions, key);
                                 }
+                                // 从注册表中根据 Key 获取 Value
                                 Value value = generatePayload(key);
                                 return value;
                             }
                         });
 
-        // 开启三级缓存时
+        long responseCacheUpdateIntervalMs = serverConfig.getResponseCacheUpdateIntervalMs();
+        // 若开启了只读缓存
         if (shouldUseReadOnlyResponseCache) {
-            // 定时器，30秒一次，更新三级缓存中的数据
-            timer.schedule(getCacheUpdateTask(),
-                    new Date(((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
-                            + responseCacheUpdateIntervalMs),
-                    responseCacheUpdateIntervalMs);
+            // 定时器，每隔30秒调度一次，同步读写缓存的数据到只读缓存
+            timer.schedule(
+                    // 只读缓存的更新同步任务
+                    getCacheUpdateTask(),
+                    // 延迟调度时间
+                    new Date(
+                            ((System.currentTimeMillis() / responseCacheUpdateIntervalMs) * responseCacheUpdateIntervalMs)
+                                    + responseCacheUpdateIntervalMs
+                    ),
+                    // 30s 调度一次
+                    responseCacheUpdateIntervalMs
+            );
         }
 
         try {
@@ -179,20 +222,26 @@ public class ResponseCacheImpl implements ResponseCache {
         }
     }
 
+    /**
+     * 只读缓存的更新同步任务
+     */
     private TimerTask getCacheUpdateTask() {
         return new TimerTask() {
             @Override
             public void run() {
                 logger.debug("Updating the client cache from response cache");
+                // 遍历只读缓存中的 key
                 for (Key key : readOnlyCacheMap.keySet()) {
                     if (logger.isDebugEnabled()) {
                         logger.debug("Updating the client cache from response cache for key : {} {} {} {}",
                                 key.getEntityType(), key.getName(), key.getVersion(), key.getType());
                     }
+                    // 从读写缓存中加载 key 对应的 value，如果读写缓存与只读缓存中的数据不一致则更新只读缓存
                     try {
                         CurrentRequestVersion.set(key.getVersion());
                         Value cacheValue = readWriteCacheMap.get(key);
                         Value currentCacheValue = readOnlyCacheMap.get(key);
+                        // 数据不一致，更新只读缓存
                         if (cacheValue != currentCacheValue) {
                             readOnlyCacheMap.put(key, cacheValue);
                         }
@@ -207,6 +256,9 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /**
+     * 从缓存中获取注册表信息
+     *
+     * <p>
      * Get the cached information about applications.
      *
      * <p>
@@ -222,6 +274,10 @@ public class ResponseCacheImpl implements ResponseCache {
         return get(key, shouldUseReadOnlyResponseCache);
     }
 
+    /**
+     * 从缓存中获取注册表信息
+     * useReadOnlyCache：是否启用只读缓存，默认开启
+     */
     @VisibleForTesting
     String get(final Key key, boolean useReadOnlyCache) {
         Value payload = getValue(key, useReadOnlyCache);
@@ -359,12 +415,16 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /**
+     * 根据指定的 key 从缓存中获取注册表
+     *
+     * <p>
      * Get the payload in both compressed and uncompressed form.
      */
     @VisibleForTesting
     Value getValue(final Key key, boolean useReadOnlyCache) {
         Value payload = null;
         try {
+            // 启用只读缓存时，先从只读缓存获取，获取失败则从读写缓存中获取并回填数据
             if (useReadOnlyCache) {
                 final Value currentPayload = readOnlyCacheMap.get(key);
                 if (currentPayload != null) {
@@ -373,16 +433,24 @@ public class ResponseCacheImpl implements ResponseCache {
                     payload = readWriteCacheMap.get(key);
                     readOnlyCacheMap.put(key, payload);
                 }
-            } else {
+            }
+            // 禁用只读缓存时，直接从读写缓存获取
+            else {
                 payload = readWriteCacheMap.get(key);
             }
+            // 读写缓存获取不到会自动调用缓存加载函数从注册表中加载
         } catch (Throwable t) {
             logger.error("Cannot get value for key : {}", key, t);
         }
+        // 返回注册表
         return payload;
     }
 
     /**
+     * 将注册表中的所有服务编码为 json 或 xml 格式。
+     * 后续会统一封装到 Value 对象中，然后放入注册表缓存
+     *
+     * <p>
      * Generate pay load with both JSON and XML formats for all applications.
      */
     private String getPayLoad(Key key, Applications apps) {
@@ -401,6 +469,10 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /**
+     * 将注册表中的某个服务编码为 json 或 xml 格式。
+     * 后续会统一封装到 Value 对象中，然后放入注册表缓存
+     *
+     * <p>
      * Generate pay load with both JSON and XML formats for a given application.
      */
     private String getPayLoad(Key key, Application app) {
@@ -418,42 +490,59 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /*
+     * 读写缓存的自动加载方法。
+     * 根据 Key 的类型，从注册表中构建出对应的 Value
      * Generate pay load for the given key.
      */
     private Value generatePayload(Key key) {
         Stopwatch tracer = null;
         try {
+            // 加载结果，xml 或 json 格式
             String payload;
+
+            // 根据缓存Key 的类型加载缓存
             switch (key.getEntityType()) {
+                // 注册表
                 case Application:
                     boolean isRemoteRegionRequested = key.hasRegions();
-
+                    // 加载全量注册表缓存
                     if (ALL_APPS.equals(key.getName())) {
                         if (isRemoteRegionRequested) {
                             tracer = serializeAllAppsWithRemoteRegionTimer.start();
                             payload = getPayLoad(key, registry.getApplicationsFromMultipleRegions(key.getRegions()));
-                        } else {
+                        }
+                        // 获取注册表中的所有服务实例
+                        else {
                             tracer = serializeAllAppsTimer.start();
+                            // 调用注册表对象的 getApplications() 方法，获取注册表中所有实例信息
                             payload = getPayLoad(key, registry.getApplications());
                         }
-                    } else if (ALL_APPS_DELTA.equals(key.getName())) {
+                    }
+                    // 加载增量注册表缓存
+                    else if (ALL_APPS_DELTA.equals(key.getName())) {
                         if (isRemoteRegionRequested) {
                             tracer = serializeDeltaAppsWithRemoteRegionTimer.start();
                             versionDeltaWithRegions.incrementAndGet();
                             versionDeltaWithRegionsLegacy.incrementAndGet();
                             payload = getPayLoad(key,
                                     registry.getApplicationDeltasFromMultipleRegions(key.getRegions()));
-                        } else {
+                        }
+                        // 获取注册表中的增量数据
+                        else {
                             tracer = serializeDeltaAppsTimer.start();
                             versionDelta.incrementAndGet();
                             versionDeltaLegacy.incrementAndGet();
+                            // 调用注册表对象的 getApplicationDeltas() 方法，从最近变更队列中获取增量数据
                             payload = getPayLoad(key, registry.getApplicationDeltas());
                         }
-                    } else {
+                    }
+                    // 加载某个服务所有实例的缓存
+                    else {
                         tracer = serializeOneApptimer.start();
                         payload = getPayLoad(key, registry.getApplication(key.getName()));
                     }
                     break;
+                // 以下暂不关注
                 case VIP:
                 case SVIP:
                     tracer = serializeViptimer.start();
@@ -513,11 +602,15 @@ public class ResponseCacheImpl implements ResponseCache {
     }
 
     /**
-     * The class that stores payload in both compressed and uncompressed form.
+     * 内部类，用于封装压缩和未压缩的注册表数据，方便统一存入缓存
      *
+     * <p>
+     * The class that stores payload in both compressed and uncompressed form.
      */
     public class Value {
+        // 未压缩的注册表数据，json 或 xml 格式
         private final String payload;
+        // 压缩后的注册表数据
         private byte[] gzipped;
 
         public Value(String payload) {
