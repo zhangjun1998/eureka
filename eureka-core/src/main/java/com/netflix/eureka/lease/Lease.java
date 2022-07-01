@@ -19,6 +19,9 @@ package com.netflix.eureka.lease;
 import com.netflix.eureka.registry.AbstractInstanceRegistry;
 
 /**
+ * 续约信息
+ *
+ * <p>
  * Describes a time-based availability of a {@link T}. Purpose is to avoid
  * accumulation of instances in {@link AbstractInstanceRegistry} as result of ungraceful
  * shutdowns that is not uncommon in AWS environments.
@@ -55,6 +58,11 @@ public class Lease<T> {
     }
 
     /**
+     * 刷新实例的最后更新时间。
+     * 这里有个bug，最后更新时间 = 当前时间 + duration(默认90s)，实际上这里不应该加上 duration，因为后面 {@link #isExpired()} 在计算实例是否过期时又重复加了一次，
+     * 因此在计算实例是否过期时就多算了90s，也就是说实例在超过 180s 没有续约才会被认为过期，而非 90s。
+     *
+     * <p>
      * Renew the lease, use renewal duration if it was specified by the
      * associated {@link T} during registration, otherwise default duration is
      * {@link #DEFAULT_DURATION_IN_SECS}.
@@ -98,6 +106,14 @@ public class Lease<T> {
     }
 
     /**
+     * 计算实例是否已过期，满足以下任意条件之一即可：
+     * <ul>
+     *     <li>下线时间 > 0，在实例主动下线时触发</li>
+     *     <li>连续三个心跳周期 90s 没有续约(有bug，实际是180s)</li>
+     *     <li></li>
+     * </ul>
+     *
+     * <p>
      * Checks if the lease of a given {@link com.netflix.appinfo.InstanceInfo} has expired or not.
      *
      * Note that due to renew() doing the 'wrong" thing and setting lastUpdateTimestamp to +duration more than
@@ -108,7 +124,12 @@ public class Lease<T> {
      * @param additionalLeaseMs any additional lease time to add to the lease evaluation in ms.
      */
     public boolean isExpired(long additionalLeaseMs) {
-        return (evictionTimestamp > 0 || System.currentTimeMillis() > (lastUpdateTimestamp + duration + additionalLeaseMs));
+        return (
+                // 下线时间 > 0，说明服务实例主动下线了
+                evictionTimestamp > 0
+                // 实例的最后更新时间+续约过期阈值+补偿时间 < 当前时间，说明实例至少连续三个心跳周期没有续约，应当摘除
+                || System.currentTimeMillis() > (lastUpdateTimestamp + duration + additionalLeaseMs)
+        );
     }
 
     /**

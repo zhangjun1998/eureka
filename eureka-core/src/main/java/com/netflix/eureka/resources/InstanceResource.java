@@ -273,6 +273,9 @@ public class InstanceResource {
     }
 
     /**
+     * 取消续约，即取消注册
+     *
+     * <p>
      * Handles cancellation of leases for this particular instance.
      *
      * @param isReplication
@@ -282,11 +285,10 @@ public class InstanceResource {
      *         failure.
      */
     @DELETE
-    public Response cancelLease(
-            @HeaderParam(PeerEurekaNode.HEADER_REPLICATION) String isReplication) {
+    public Response cancelLease(@HeaderParam(PeerEurekaNode.HEADER_REPLICATION) String isReplication) {
         try {
-            boolean isSuccess = registry.cancel(app.getName(), id,
-                "true".equals(isReplication));
+            // 调用注册表的 cancel() 方法取消注册
+            boolean isSuccess = registry.cancel(app.getName(), id, "true".equals(isReplication));
 
             if (isSuccess) {
                 logger.debug("Found (Cancel): {} - {}", app.getName(), id);

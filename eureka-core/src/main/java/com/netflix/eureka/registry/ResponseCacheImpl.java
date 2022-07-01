@@ -132,17 +132,6 @@ public class ResponseCacheImpl implements ResponseCache {
      * <li>每30s调度一次的定时任务会自动更新只读缓存</li>
      */
 
-    /**
-     * 官方彩蛋，最为致命：
-     * 读写缓存的默认过期时间是 180s，而心跳续约的默认间隔是 30s，3个心跳周期也就是 90s 没有收到就认为实例下线了，
-     * 如果客户端拉取注册表时读写缓存正好刚刚加载完毕，那么此时读取的还是读写缓存中的旧数据，
-     * 也就是说服务下线后在最好的情况下客户端可以在 0~30s 内立即得知，在最差的情况下则需要等待读写缓存过期即 180s。
-     *
-     * eureka-server 在3个心跳周期即 90s 内没有收到心跳则认为服务下线，但是 eureka-client 客户端可能需要 180s 才可以感知到。
-     *
-     * 官方彩蛋，最为致命，务必小心
-     */
-
     // 一级缓存，基于 ConcurrentHashMap 的只读缓存，拉取注册表时默认从一级缓存中获取，有定时任务每30s更新一次缓存
     // 一级缓存获取注册表失败则会走二级缓存获取，并将获取结果回填到一级缓存
     private final ConcurrentMap<Key, Value> readOnlyCacheMap = new ConcurrentHashMap<Key, Value>();
