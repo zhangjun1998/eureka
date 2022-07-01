@@ -36,6 +36,7 @@
 + [x] ApplicationResource
 + [x] ApplicationsResource
 + [x] InstanceResource
++ [x] Lease
 + [ ] ...
 + 
 

@@ -285,7 +285,7 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         logger.info("Changing status to UP");
         // 更新实例状态为 UP，触发应用实例状态变化监听器，执行 InstanceInfoReplicator 完成应用注册
         applicationInfoManager.setInstanceStatus(InstanceStatus.UP);
-        // 执行注册的一些后置操作
+        // 执行启动的一些后置操作，启动最近一分钟续约计数器，启动定时任务剔除下线实例
         super.postInit();
     }
 
@@ -406,6 +406,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     }
 
     /*
+     * 取消注册指定的应用实例
+     *
+     * <p>
      * (non-Javadoc)
      *
      * @see com.netflix.eureka.registry.InstanceRegistry#cancel(java.lang.String,
@@ -414,7 +417,9 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
     @Override
     public boolean cancel(final String appName, final String id,
                           final boolean isReplication) {
+        // 调用抽象父类的 cancel() 方法
         if (super.cancel(appName, id, isReplication)) {
+            // 将实例的取消注册操作同步到集群中其它节点
             replicateToPeers(Action.Cancel, appName, id, null, null, isReplication);
 
             return true;
@@ -522,12 +527,19 @@ public class PeerAwareInstanceRegistryImpl extends AbstractInstanceRegistry impl
         }
     }
 
+    /**
+     * 是否允许剔除实例
+     * 取决于自我保护机制
+     */
     @Override
     public boolean isLeaseExpirationEnabled() {
+        // 自我保护机制配置为关闭(默认开启)，直接返回允许
         if (!isSelfPreservationModeEnabled()) {
             // The self preservation mode is disabled, hence allowing the instances to expire.
             return true;
         }
+        // 若最近一分钟的实际续约次数 > 最近一分钟最低续约次数阈值，则允许剔除，否则不允许
+        // 最低续约次数阈值 = 期望续约的客户端数量 * （60 / 续约间隔时间(30s)） * 续约百分比(0.85)
         return numberOfRenewsPerMinThreshold > 0 && getNumOfRenewsInLastMin() > numberOfRenewsPerMinThreshold;
     }
 

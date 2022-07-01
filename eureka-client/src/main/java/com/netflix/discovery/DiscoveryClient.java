@@ -1010,22 +1010,28 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
+     * 客户端下线
+     *
+     * <p>
      * Shuts down Eureka Client. Also sends a deregistration request to the
      * eureka server.
      */
     @PreDestroy
     @Override
     public synchronized void shutdown() {
+        // CAS 修改为下线状态
         if (isShutdown.compareAndSet(false, true)) {
             logger.info("Shutting down DiscoveryClient ...");
 
+            // 移除状态变更监听器
             if (statusChangeListener != null && applicationInfoManager != null) {
                 applicationInfoManager.unregisterStatusChangeListener(statusChangeListener.getId());
             }
 
+            // 关闭一系列的调度任务，如 注册、心跳、拉取注册表等，销毁相关线程池
             cancelScheduledTasks();
 
-            // If APPINFO was registered
+            // 取消注册，实际就是调用 eureka-server 的 /apps/{appName}/{instanceId} 接口
             if (applicationInfoManager != null
                     && clientConfig.shouldRegisterWithEureka()
                     && clientConfig.shouldUnregisterOnShutdown()) {
@@ -1033,10 +1039,10 @@ public class DiscoveryClient implements EurekaClient {
                 unregister();
             }
 
+            // 关闭其它资源
             if (eurekaTransport != null) {
                 eurekaTransport.shutdown();
             }
-
             heartbeatStalenessMonitor.shutdown();
             registryStalenessMonitor.shutdown();
 
@@ -1047,6 +1053,9 @@ public class DiscoveryClient implements EurekaClient {
     }
 
     /**
+     * 从 eureka-server 取消注册
+     *
+     * <p>
      * unregister w/ the eureka service.
      */
     void unregister() {
@@ -1054,6 +1063,7 @@ public class DiscoveryClient implements EurekaClient {
         if(eurekaTransport != null && eurekaTransport.registrationClient != null) {
             try {
                 logger.info("Unregistering ...");
+                // 就是调用了 eureka-server 的下线接口，DELETE /apps/{appName}/{instanceId}
                 EurekaHttpResponse<Void> httpResponse = eurekaTransport.registrationClient.cancel(instanceInfo.getAppName(), instanceInfo.getId());
                 logger.info(PREFIX + "{} - deregister  status: {}", appPathIdentifier, httpResponse.getStatusCode());
             } catch (Exception e) {
